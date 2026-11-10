@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 type Station={id:number;name:string;kind:'Snooker'|'Pool'|'Gaming';rate:number;startedAt:number|null;pausedAt:number|null;pausedMs:number;players:number;segments:{at:number;players:number}[];orders:{id:number;name:string;price:number;qty:number}[]};
 type Match={id:number;winner:string;loser:string;at:number};
 type Bill={id:number;station:string;minutes:number;playing:number;snacks:number;total:number;at:number};
-const initial:Station[]=[{id:1,name:'Snooker Table 1',kind:'Snooker',rate:6},{id:2,name:'Snooker Table 2',kind:'Snooker',rate:6},{id:3,name:'Pool Table 1',kind:'Pool',rate:5},{id:4,name:'PS5 Station 1',kind:'Gaming',rate:5}].map(s=>({...s,startedAt:null,pausedAt:null,pausedMs:0,players:2,segments:[],orders:[]}));
+const initial:Station[]=([{id:1,name:'Snooker Table 1',kind:'Snooker',rate:6},{id:2,name:'Snooker Table 2',kind:'Snooker',rate:6},{id:3,name:'Pool Table 1',kind:'Pool',rate:5},{id:4,name:'PS5 Station 1',kind:'Gaming',rate:5}] satisfies Pick<Station,'id'|'name'|'kind'|'rate'>[]).map(s=>({...s,startedAt:null,pausedAt:null,pausedMs:0,players:2,segments:[],orders:[]}));
 const menu=[{id:1,name:'Cold Drink',price:40},{id:2,name:'French Fries',price:120},{id:3,name:'Maggi',price:80},{id:4,name:'Water Bottle',price:20},{id:5,name:'Sandwich',price:100}];
 const rupee=(n:number)=>new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0}).format(n);
 const fmt=(ms:number)=>{let s=Math.floor(ms/1000);return [Math.floor(s/3600),Math.floor(s%3600/60),s%60].map(v=>String(v).padStart(2,'0')).join(':')};
