@@ -28,6 +28,49 @@ export default {
   if(!path.startsWith('/api/staff/'))return reply({error:'Not found'},404);
   if(req.method==='POST'&&req.headers.get('Origin')!==url.origin)return reply({error:'Origin mismatch'},403);
   if(path==='/api/staff/me'&&req.method==='GET'){const staff=await user(req,env);return staff?reply({authenticated:true,staff}):reply({authenticated:false},401)}
+  // Advance reservations are staff-only; slot uniqueness is enforced by D1.
+  if(path==='/api/staff/reservations'&&(req.method==='GET'||req.method==='POST')){
+   const staff=await user(req,env);if(!staff)return reply({error:'Staff authentication required'},401);
+   if(req.method==='GET'){
+    const from=Number(url.searchParams.get('from'))||Date.now()-86400000;
+    const to=Number(url.searchParams.get('to'))||Date.now()+30*86400000;
+    if(!Number.isFinite(from)||!Number.isFinite(to)||to<=from||to-from>45*86400000)return reply({error:'Invalid date range'},400);
+    try{const rows=await env.DB.prepare("SELECT r.id,r.station_id,s.name AS station_name,r.customer_name,r.customer_phone,r.party_size,r.starts_at,r.ends_at,r.status,r.notes FROM reservations r JOIN stations s ON s.id=r.station_id WHERE r.starts_at<? AND r.ends_at>? ORDER BY r.starts_at ASC LIMIT 500").bind(to,from).all();return reply({reservations:rows.results})}catch{return reply({error:'Reservation database migration required'},503)}
+   }
+   const b=await body(req),stationId=Number(b.station_id),partySize=Number(b.party_size),start=Number(b.starts_at),end=Number(b.ends_at);
+   const name=typeof b.customer_name==='string'?b.customer_name.trim():'';
+   const phone=typeof b.customer_phone==='string'?b.customer_phone.trim():'';
+   const notes=typeof b.notes==='string'?b.notes.trim():'';
+   const now=Date.now(),slot=300000;
+   if(!Number.isInteger(stationId)||!Number.isInteger(partySize)||partySize<1||partySize>20||name.length<2||name.length>100||phone.length>30||notes.length>500||!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<now-60000||start>now+30*86400000||end<=start||end-start>4*3600000||end-start<15*60000||start%slot!==0||end%slot!==0)return reply({error:'Invalid booking. Choose a future 5-minute time slot and a duration between 15 minutes and 4 hours.'},400);
+   const station=await env.DB.prepare('SELECT id FROM stations WHERE id=? AND enabled=1').bind(stationId).first();
+   if(!station)return reply({error:'Station unavailable'},404);
+   const open=await env.DB.prepare("SELECT id FROM sessions WHERE station_id=? AND status IN ('active','paused') LIMIT 1").bind(stationId).first();
+   if(open)return reply({error:'Table has an active session; cannot confirm an advance booking until it ends.'},409);
+   // D1 batch is atomic. The UNIQUE (station_id,slot_start) index rejects competing writes.
+   const slots:number[]=[];for(let t=start;t<end;t+=slot)slots.push(t);
+   try{
+    const statements=[env.DB.prepare("INSERT INTO reservations(station_id,customer_name,customer_phone,party_size,starts_at,ends_at,status,notes,created_by,created_at) VALUES(?,?,?,?,?,?,'confirmed',?,?,?)").bind(stationId,name,phone,partySize,start,end,notes,staff.id,now),
+      ...slots.map(t=>env.DB.prepare('INSERT INTO reservation_slots(station_id,slot_start,reservation_id) VALUES(?,?,last_insert_rowid())').bind(stationId,t))];
+    const result=await env.DB.batch(statements);
+    return reply({ok:true,id:result[0].meta.last_row_id},201);
+   }catch{return reply({error:'Booking conflicts with an existing reservation, or the reservation database is not ready.'},409)}
+  }
+  if(/^\\/api\\/staff\\/reservations\\/\\d+$/.test(path)&&req.method==='POST'){
+   const staff=await user(req,env);if(!staff)return reply({error:'Staff authentication required'},401);
+   const id=Number(path.split('/').pop()),b=await body(req);
+   if(b.action!=='cancel'&&b.action!=='complete')return reply({error:'Invalid action'},400);
+   try{
+    const existing=await env.DB.prepare("SELECT id,status FROM reservations WHERE id=?").bind(id).first<{id:number;status:string}>();
+    if(!existing)return reply({error:'Reservation not found'},404);
+    if(existing.status!=='confirmed')return reply({error:'Reservation is already closed'},409);
+    await env.DB.batch([
+      env.DB.prepare("UPDATE reservations SET status=? WHERE id=? AND status='confirmed'").bind(b.action==='cancel'?'cancelled':'completed',id),
+      env.DB.prepare('DELETE FROM reservation_slots WHERE reservation_id=?').bind(id)
+    ]);
+    return reply({ok:true});
+   }catch{return reply({error:'Reservation database migration required'},503)}
+  }
   if(path==='/api/staff/bootstrap'&&req.method==='POST'){
    if(!env.STAFF_BOOTSTRAP_SECRET||!env.STAFF_PIN_PEPPER)return reply({error:'Staff setup not configured'},503);
    const b=await body(req);if(!validName(b.username)||!validPin(b.pin)||typeof b.secret!=='string'||!same(b.secret,env.STAFF_BOOTSTRAP_SECRET))return reply({error:'Invalid setup credentials'},403);
