@@ -6,7 +6,7 @@ const encoder=new TextEncoder();
 const hex=(b:ArrayBuffer)=>Array.from(new Uint8Array(b)).map(v=>v.toString(16).padStart(2,'0')).join('');
 const randomHex=(n:number)=>{const b=new Uint8Array(n);crypto.getRandomValues(b);return Array.from(b).map(v=>v.toString(16).padStart(2,'0')).join('')};
 async function hashToken(s:string){return hex(await crypto.subtle.digest('SHA-256',encoder.encode(s)))}
-async function pinHash(pin:string,salt:string,pepper:string){const key=await crypto.subtle.importKey('raw',encoder.encode(pin+':'+pepper),'PBKDF2',false,['deriveBits']);return hex(await crypto.subtle.deriveBits({name:'PBKDF2',salt:encoder.encode(salt),iterations:210000,hash:'SHA-256'},key,256))}
+async function pinHash(pin:string,salt:string,pepper:string){const key=await crypto.subtle.importKey('raw',encoder.encode(pin+':'+pepper),'PBKDF2',false,['deriveBits']);return hex(await crypto.subtle.deriveBits({name:'PBKDF2',salt:encoder.encode(salt),iterations:100000,hash:'SHA-256'},key,256))}
 const same=(a:string,b:string)=>{if(a.length!==b.length)return false;let d=0;for(let i=0;i<a.length;i++)d|=a.charCodeAt(i)^b.charCodeAt(i);return d===0};
 const cookie=(token:string,maxAge:number)=>'cue_tip_staff='+token+'; HttpOnly; Secure; SameSite=Strict; Path=/api/staff; Max-Age='+maxAge;
 const readCookie=(req:Request)=>req.headers.get('Cookie')?.split(';').map(x=>x.trim()).find(x=>x.startsWith('cue_tip_staff='))?.slice('cue_tip_staff='.length)??'';
