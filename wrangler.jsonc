@@ -1,8 +1,17 @@
 {
   "name": "cue-tip",
   "compatibility_date": "2026-11-01",
+  "main": "./worker/entry.ts",
   "assets": {
     "directory": "./dist",
+    "binding": "ASSETS",
     "not_found_handling": "single-page-application"
-  }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cue-tip-db",
+      "database_id": "ef4e8064-c9fb-4743-ada7-81d617fba627"
+    }
+  ]
 }
