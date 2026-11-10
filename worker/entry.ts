@@ -56,7 +56,7 @@ export default {
     return reply({ok:true,id:result[0].meta.last_row_id},201);
    }catch{return reply({error:'Booking conflicts with an existing reservation, or the reservation database is not ready.'},409)}
   }
-  if(/^\\/api\\/staff\\/reservations\\/\\d+$/.test(path)&&req.method==='POST'){
+  if(path.startsWith('/api/staff/reservations/')&&/^\\d+$/.test(path.slice('/api/staff/reservations/'.length))&&req.method==='POST'){
    const staff=await user(req,env);if(!staff)return reply({error:'Staff authentication required'},401);
    const id=Number(path.split('/').pop()),b=await body(req);
    if(b.action!=='cancel'&&b.action!=='complete')return reply({error:'Invalid action'},400);
