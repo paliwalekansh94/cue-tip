@@ -47,14 +47,23 @@ export default {
    if(!station)return reply({error:'Station unavailable'},404);
    const open=await env.DB.prepare("SELECT id FROM sessions WHERE station_id=? AND status IN ('active','paused') LIMIT 1").bind(stationId).first();
    if(open)return reply({error:'Table has an active session; cannot confirm an advance booking until it ends.'},409);
-   // D1 batch is atomic. The UNIQUE (station_id,slot_start) index rejects competing writes.
+   // Assign a unique reservation ID before batching. Do not rely on last_insert_rowid()
+   // across D1 prepared statements. UNIQUE slot keys reject concurrent overlapping writes.
    const slots:number[]=[];for(let t=start;t<end;t+=slot)slots.push(t);
+   const idBytes=new Uint8Array(6);crypto.getRandomValues(idBytes);
+   const reservationId=idBytes.reduce((n,b)=>n*256+b,0);
    try{
-    const statements=[env.DB.prepare("INSERT INTO reservations(station_id,customer_name,customer_phone,party_size,starts_at,ends_at,status,notes,created_by,created_at) VALUES(?,?,?,?,?,?,'confirmed',?,?,?)").bind(stationId,name,phone,partySize,start,end,notes,staff.id,now),
-      ...slots.map(t=>env.DB.prepare('INSERT INTO reservation_slots(station_id,slot_start,reservation_id) VALUES(?,?,last_insert_rowid())').bind(stationId,t))];
-    const result=await env.DB.batch(statements);
-    return reply({ok:true,id:result[0].meta.last_row_id},201);
-   }catch{return reply({error:'Booking conflicts with an existing reservation, or the reservation database is not ready.'},409)}
+    const statements=[env.DB.prepare("INSERT INTO reservations(id,station_id,customer_name,customer_phone,party_size,starts_at,ends_at,status,notes,created_by,created_at) VALUES(?,?,?,?,?,?,?,'confirmed',?,?,?)").bind(reservationId,stationId,name,phone,partySize,start,end,notes,staff.id,now),
+      ...slots.map(t=>env.DB.prepare('INSERT INTO reservation_slots(station_id,slot_start,reservation_id) VALUES(?,?,?)').bind(stationId,t,reservationId))];
+    await env.DB.batch(statements);
+    return reply({ok:true,id:reservationId},201);
+   }catch(e){
+    const message=e instanceof Error?e.message:String(e);
+    if(/UNIQUE constraint failed: reservation_slots|PRIMARY KEY constraint failed: reservation_slots/i.test(message))return reply({error:'This table is already reserved during the selected time. Choose another slot.'},409);
+    if(/no such table|no such column/i.test(message))return reply({error:'Reservation migration 0003 has not been applied to the active D1 database.'},503);
+    console.error('Reservation creation failed',message);
+    return reply({error:'Reservation could not be saved. Check Worker logs for the database error.'},500);
+   }
   }
   if(path.startsWith('/api/staff/reservations/')&&/^\\d+$/.test(path.slice('/api/staff/reservations/'.length))&&req.method==='POST'){
    const staff=await user(req,env);if(!staff)return reply({error:'Staff authentication required'},401);
