@@ -1,0 +1,8 @@
+{
+  "name": "Cue Tip Snooker Café",
+  "short_name": "Cue Tip",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#101917",
+  "theme_color": "#10221c"
+}
