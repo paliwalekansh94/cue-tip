@@ -80,6 +80,72 @@ export default {
     return reply({ok:true});
    }catch{return reply({error:'Reservation database migration required'},503)}
   }
+
+  // CMS 3.0 financial ledger: all endpoints require a valid staff session.
+  if(path==='/api/staff/cms/summary'&&req.method==='GET'){
+   const staff=await user(req,env);if(!staff)return reply({error:'Staff authentication required'},401);
+   const from=Number(url.searchParams.get('from')),to=Number(url.searchParams.get('to'));
+   if(!Number.isSafeInteger(from)||!Number.isSafeInteger(to)||from>=to||to-from>370*86400000)return reply({error:'Invalid reporting range'},400);
+   try{
+    const [totals,categories,methods]=await Promise.all([
+     env.DB.prepare("SELECT entry_type,COUNT(*) count,COALESCE(SUM(amount_paise),0) amount_paise FROM cms_transactions WHERE voided_at IS NULL AND occurred_at>=? AND occurred_at<? GROUP BY entry_type").bind(from,to).all(),
+     env.DB.prepare("SELECT entry_type,category,COALESCE(SUM(amount_paise),0) amount_paise FROM cms_transactions WHERE voided_at IS NULL AND occurred_at>=? AND occurred_at<? GROUP BY entry_type,category ORDER BY amount_paise DESC").bind(from,to).all(),
+     env.DB.prepare("SELECT entry_type,payment_method,COALESCE(SUM(amount_paise),0) amount_paise FROM cms_transactions WHERE voided_at IS NULL AND occurred_at>=? AND occurred_at<? GROUP BY entry_type,payment_method").bind(from,to).all()
+    ]);
+    return reply({totals:totals.results,categories:categories.results,methods:methods.results});
+   }catch(e){console.error('CMS summary',e);return reply({error:'CMS migration 0004 is required'},503)}
+  }
+  if(path==='/api/staff/cms/transactions'&&(req.method==='GET'||req.method==='POST')){
+   const staff=await user(req,env);if(!staff)return reply({error:'Staff authentication required'},401);
+   if(req.method==='GET'){
+    const from=Number(url.searchParams.get('from')),to=Number(url.searchParams.get('to'));
+    if(!Number.isSafeInteger(from)||!Number.isSafeInteger(to)||from>=to||to-from>370*86400000)return reply({error:'Invalid range'},400);
+    try{const rows=await env.DB.prepare("SELECT t.id,t.entry_type,t.category,t.description,t.amount_paise,t.payment_method,t.occurred_at,t.source,t.external_key,t.voided_at,c.name customer_name,s.name station_name FROM cms_transactions t LEFT JOIN cms_customers c ON c.id=t.customer_id LEFT JOIN stations s ON s.id=t.station_id WHERE t.occurred_at>=? AND t.occurred_at<? ORDER BY t.occurred_at DESC,t.id DESC LIMIT 1000").bind(from,to).all();return reply({transactions:rows.results})}catch{return reply({error:'CMS migration 0004 is required'},503)}
+   }
+   const b=await body(req);
+   const type=b.entry_type,category=typeof b.category==='string'?b.category.trim():'',description=typeof b.description==='string'?b.description.trim():'';
+   const amount=Number(b.amount_paise),at=Number(b.occurred_at),method=b.payment_method;
+   const station=b.station_id==null?null:Number(b.station_id),customer=b.customer_id==null?null:Number(b.customer_id);
+   const key=typeof b.external_key==='string'?b.external_key.trim():null;
+   if((type!=='revenue'&&type!=='expense')||category.length<2||category.length>70||description.length>500||!Number.isSafeInteger(amount)||amount<1||amount>1000000000||!['cash','upi','card','bank','other'].includes(String(method))||!Number.isSafeInteger(at)||at<Date.UTC(2000,0,1)||at>Date.now()+86400000||(station!==null&&!Number.isSafeInteger(station))||(customer!==null&&!Number.isSafeInteger(customer))||(key!==null&&(key.length<4||key.length>150)))return reply({error:'Invalid transaction fields'},400);
+   try{
+    const r=await env.DB.prepare("INSERT INTO cms_transactions(external_key,entry_type,category,description,amount_paise,payment_method,occurred_at,customer_id,station_id,source,staff_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,'manual',?,?)").bind(key,type,category,description,amount,method,at,customer,station,staff.id,Date.now()).run();
+    return reply({ok:true,id:r.meta.last_row_id},201);
+   }catch(e){const msg=String(e);if(/UNIQUE constraint failed/.test(msg))return reply({error:'Duplicate external reference'},409);console.error('CMS transaction',e);return reply({error:'Unable to save transaction. Check migration 0004 and linked IDs.'},503)}
+  }
+  if(path==='/api/staff/cms/customers'&&(req.method==='GET'||req.method==='POST')){
+   const staff=await user(req,env);if(!staff)return reply({error:'Staff authentication required'},401);
+   try{
+    if(req.method==='GET'){const r=await env.DB.prepare('SELECT id,name,phone,created_at FROM cms_customers ORDER BY name LIMIT 1000').all();return reply({customers:r.results})}
+    const b=await body(req),name=typeof b.name==='string'?b.name.trim():'',phone=typeof b.phone==='string'?b.phone.trim():'';
+    if(name.length<2||name.length>100||phone.length<5||phone.length>25)return reply({error:'Enter a name and a valid phone number'},400);
+    const r=await env.DB.prepare('INSERT INTO cms_customers(name,phone,created_at) VALUES(?,?,?)').bind(name,phone,Date.now()).run();return reply({ok:true,id:r.meta.last_row_id},201);
+   }catch(e){if(/UNIQUE constraint failed/.test(String(e)))return reply({error:'This phone number already exists'},409);return reply({error:'CMS migration 0004 is required'},503)}
+  }
+  if(/^\/api\/staff\/cms\/transactions\/\d+\/void$/.test(path)&&req.method==='POST'){
+   const staff=await user(req,env);if(!staff)return reply({error:'Staff authentication required'},401);
+   const id=Number(path.split('/')[5]),b=await body(req),reason=typeof b.reason==='string'?b.reason.trim():'';
+   if(reason.length<5||reason.length>300)return reply({error:'Provide a reason (5-300 characters)'},400);
+   try{const r=await env.DB.prepare('UPDATE cms_transactions SET voided_at=?,voided_by=?,void_reason=? WHERE id=? AND voided_at IS NULL').bind(Date.now(),staff.id,reason,id).run();return r.meta.changes?reply({ok:true}):reply({error:'Record not found or already voided'},409)}catch{return reply({error:'CMS migration 0004 is required'},503)}
+  }
+  if(path==='/api/staff/cms/import'&&req.method==='POST'){
+   const staff=await user(req,env);if(!staff)return reply({error:'Staff authentication required'},401);
+   const b=await body(req),rows=b.rows,label=typeof b.label==='string'?b.label.trim():'';
+   if(!Array.isArray(rows)||rows.length<1||rows.length>100||label.length<3||label.length>100)return reply({error:'Import 1-100 rows at a time with a batch label'},400);
+   const parsed:{key:string;type:string;category:string;description:string;amount:number;method:string;at:number}[]=[];
+   for(const raw of rows){if(!raw||typeof raw!=='object')return reply({error:'Invalid import row'},400);const r=raw as Record<string,unknown>;const key=String(r.external_key||''),type=String(r.entry_type||''),category=String(r.category||''),description=String(r.description||''),amount=Number(r.amount_paise),method=String(r.payment_method||''),at=Number(r.occurred_at);
+    if(key.length<4||key.length>150||!['revenue','expense'].includes(type)||category.length<2||category.length>70||description.length>500||!Number.isSafeInteger(amount)||amount<1||amount>1000000000||!['cash','upi','card','bank','other'].includes(method)||!Number.isSafeInteger(at)||at<Date.UTC(2000,0,1)||at>Date.now()+86400000)return reply({error:'Invalid import row: '+key},400);
+    parsed.push({key,type,category,description,amount,method,at});
+   }
+   if(new Set(parsed.map(x=>x.key)).size!==parsed.length)return reply({error:'Duplicate references within the import batch'},409);
+   try{
+    const now=Date.now();
+    const statements=parsed.map(x=>env.DB.prepare("INSERT INTO cms_transactions(external_key,entry_type,category,description,amount_paise,payment_method,occurred_at,source,staff_id,created_at) VALUES(?,?,?,?,?,?,?,'import',?,?)").bind(x.key,x.type,x.category,x.description,x.amount,x.method,x.at,staff.id,now));
+    statements.push(env.DB.prepare('INSERT INTO cms_import_batches(label,imported_by,created_at,accepted,rejected) VALUES(?,?,?,?,0)').bind(label,staff.id,now,parsed.length));
+    await env.DB.batch(statements);return reply({ok:true,imported:parsed.length},201);
+   }catch(e){console.error('CMS import',e);return reply({error:'Import failed. Check migration 0004 and duplicate external references; no rows should be accepted from this batch.'},409)}
+  }
+
   if(path==='/api/staff/bootstrap'&&req.method==='POST'){
    if(!env.STAFF_BOOTSTRAP_SECRET||!env.STAFF_PIN_PEPPER)return reply({error:'Staff setup not configured'},503);
    const b=await body(req);if(!validName(b.username)||!validPin(b.pin)||typeof b.secret!=='string'||!same(b.secret,env.STAFF_BOOTSTRAP_SECRET))return reply({error:'Invalid setup credentials'},403);
